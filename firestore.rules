@@ -1,0 +1,89 @@
+rules_version = '2';
+
+// Paste these rules in Firebase Console -> Firestore Database -> Rules, then Publish.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // Photos are optional: at most 3 small images stored inside a listing.
+    function photosOk() {
+      return !('photos' in request.resource.data)
+             || (request.resource.data.photos is list && request.resource.data.photos.size() <= 3);
+    }
+
+    // Profiles: each user can read/write only their own document.
+    match /users/{uid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+    }
+
+    // Module 1: housing listings. Any signed-in user can read; only the owner can change or delete.
+    // The owner cannot hand the post to someone else (ownerId is immutable).
+    match /listings/{id} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+                    && request.resource.data.ownerId == request.auth.uid
+                    && request.resource.data.rent is number
+                    && request.resource.data.rent > 0
+                    && photosOk();
+      allow update: if signedIn()
+                    && resource.data.ownerId == request.auth.uid
+                    && request.resource.data.ownerId == resource.data.ownerId
+                    && photosOk();
+      allow delete: if signedIn() && resource.data.ownerId == request.auth.uid;
+    }
+
+    // Module 2: tuition posts. Same ownership rules as listings.
+    match /tuitions/{id} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+                    && request.resource.data.ownerId == request.auth.uid
+                    && request.resource.data.salary is number
+                    && request.resource.data.salary > 0;
+      allow update: if signedIn()
+                    && resource.data.ownerId == request.auth.uid
+                    && request.resource.data.ownerId == resource.data.ownerId;
+      allow delete: if signedIn() && resource.data.ownerId == request.auth.uid;
+    }
+
+    // Interest requests: only the sender and the post owner can read them.
+    match /requests/{requestId} {
+      allow read: if signedIn()
+                  && (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid);
+      allow create: if signedIn()
+                    && request.resource.data.fromUid == request.auth.uid
+                    && request.resource.data.status == 'pending';
+      // The receiver may change the status; both sides may update the chat preview fields.
+      allow update: if signedIn() && (
+                      (resource.data.toUid == request.auth.uid
+                        && request.resource.data.diff(resource.data).affectedKeys()
+                             .hasOnly(['status', 'lastMessage', 'lastMessageAt', 'lastSenderUid']))
+                      ||
+                      (resource.data.fromUid == request.auth.uid
+                        && request.resource.data.diff(resource.data).affectedKeys()
+                             .hasOnly(['lastMessage', 'lastMessageAt', 'lastSenderUid']))
+                    );
+      // The sender can withdraw a request.
+      allow delete: if signedIn() && resource.data.fromUid == request.auth.uid;
+
+      // Chat messages: only the two people on the request can read or write them.
+      // Messages cannot be edited or deleted, and chat is closed once a request is declined.
+      match /messages/{messageId} {
+        allow read: if signedIn()
+                    && (get(/databases/$(database)/documents/requests/$(requestId)).data.fromUid == request.auth.uid
+                        || get(/databases/$(database)/documents/requests/$(requestId)).data.toUid == request.auth.uid);
+        allow create: if signedIn()
+                      && request.resource.data.senderUid == request.auth.uid
+                      && request.resource.data.text is string
+                      && request.resource.data.text.size() > 0
+                      && request.resource.data.text.size() <= 1000
+                      && (getAfter(/databases/$(database)/documents/requests/$(requestId)).data.fromUid == request.auth.uid
+                          || getAfter(/databases/$(database)/documents/requests/$(requestId)).data.toUid == request.auth.uid)
+                      && getAfter(/databases/$(database)/documents/requests/$(requestId)).data.status != 'declined';
+        allow update, delete: if false;
+      }
+    }
+  }
+}
